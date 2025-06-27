@@ -3819,6 +3819,8 @@ HAL_StatusTypeDef HAL_TIM_Encoder_Stop_DMA(TIM_HandleTypeDef *htim, uint32_t Cha
   * @param  htim TIM  handle
   * @retval None
   */
+
+
 void HAL_TIM_IRQHandler(TIM_HandleTypeDef *htim)
 {
   uint32_t itsource = htim->Instance->DIER;

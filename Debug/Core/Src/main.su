@@ -1,0 +1,15 @@
+../Core/Src/main.c:80:6:HAL_ADC_ConvCpltCallback	16	static
+../Core/Src/main.c:94:6:setMuxChannel	16	static
+../Core/Src/main.c:118:6:MotorA_Forward	8	static
+../Core/Src/main.c:125:6:MotorA_Reverse	8	static
+../Core/Src/main.c:132:6:MotorB_Forward	8	static
+../Core/Src/main.c:139:6:MotorB_Reverse	8	static
+../Core/Src/main.c:146:6:Motors_Stop	4	static
+../Core/Src/main.c:159:5:main	176	static
+../Core/Src/main.c:241:6:SystemClock_Config	88	static
+../Core/Src/main.c:288:13:MX_ADC1_Init	24	static
+../Core/Src/main.c:335:13:MX_TIM3_Init	48	static
+../Core/Src/main.c:388:13:MX_USART3_UART_Init	8	static
+../Core/Src/main.c:419:13:MX_DMA_Init	16	static
+../Core/Src/main.c:437:13:MX_GPIO_Init	40	static
+../Core/Src/main.c:489:6:Error_Handler	4	static,ignoring_inline_asm
