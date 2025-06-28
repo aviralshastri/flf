@@ -56,11 +56,18 @@ UART_HandleTypeDef huart3;
 
 
 #define IR_CHANNEL_COUNT 16
+#define CALIB_SAMPLES    100
+#define CENTER_VALUE     2047
+#define MIN_GROUP_COUNT  10
+
+
 volatile uint16_t ir_buffer0[IR_CHANNEL_COUNT];
 volatile uint16_t ir_buffer1[IR_CHANNEL_COUNT];
 volatile uint16_t *ir_buffers[2] = { ir_buffer0, ir_buffer1 };
 volatile uint16_t last_error =0;
 volatile float integral=0;
+volatile float error = 0.0f;
+volatile uint32_t time_diff = 0;
 volatile float derivative=0;
 volatile float correction=0;
 volatile int8_t weights[16]={-7,-6,-5,-4,-3,-2,-1,0,1,2,3,4,5,6,7,0};
@@ -70,6 +77,10 @@ volatile uint8_t current_ir    = 0;
 volatile uint16_t motor_a_speed = 0;
 volatile uint16_t motor_b_speed = 0;
 volatile uint16_t adc_dma_val;
+volatile uint32_t prev_time = HAL_GetTick();
+volatile uint32_t current_time =0;
+volatile float threshold[IR_CHANNEL_COUNT];
+
 
 
 /* USER CODE END PV */
@@ -90,6 +101,7 @@ static void MX_TIM1_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
     if(hadc->Instance == ADC1)
@@ -109,9 +121,79 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
     }
 }
 
+
+int boyer_moore_majority(int *arr, int size) {
+    int candidate = -1;
+    int count = 0;
+    for (int i = 0; i < size; i++) {
+        if (count == 0) {
+            candidate = arr[i];
+            count = 1;
+        } else if (arr[i] == candidate) {
+            count++;
+        } else {
+            count--;
+        }
+    }
+    return candidate;
+}
+
+
+
+void calibration(void) {
+
+	// motor start function
+
+    int calib_data[CALIB_SAMPLES][IR_CHANNEL_COUNT];
+    int i, j;
+
+    for (i = 0; i < CALIB_SAMPLES; i++) {
+        for (j = 0; j < IR_CHANNEL_COUNT; j++) {
+            calib_data[i][j] = ir_buffers[read_buf_idx][j];
+        }
+        HAL_Delay(5);
+    }
+
+
+    for (j = 0; j < IR_CHANNEL_COUNT; j++) {
+        int black_vals[CALIB_SAMPLES], white_vals[CALIB_SAMPLES];
+        int black_count = 0, white_count = 0;
+        int min_val = 4095, max_val = 0;
+
+
+        for (i = 0; i < CALIB_SAMPLES; i++) {
+            int value = calib_data[i][j];
+
+            if (value >= CENTER_VALUE) {
+                black_vals[black_count++] = value;
+            } else {
+                white_vals[white_count++] = value;
+            }
+
+            if (value < min_val) min_val = value;
+            if (value > max_val) max_val = value;
+        }
+
+        if (black_count >= MIN_GROUP_COUNT && white_count >= MIN_GROUP_COUNT) {
+            int black_majority = boyer_moore_majority(black_vals, black_count);
+            int white_majority = boyer_moore_majority(white_vals, white_count);
+            thresholds[j] = (black_majority + white_majority) / 2;
+        }
+        else {
+            thresholds[j] = (min_val + max_val) / 2;
+        }
+    }
+
+    // motor stop function
+}
+
+
 void pid_loop(void){
 
 	int weighted_sum=0;
+	int total_activation = 0;
+
+
 	for (int i=0;i<IR_CHANNEL_COUNT;i++){
 		weighted_sum+=(ir_buffers[read_buf_idx][i]*weights[i]);
 	}
@@ -120,11 +202,16 @@ void pid_loop(void){
 
 	}
 
-	integral_error+=error;
-	derivative=error-last_error;
+	current_time= HAL_GetTick();
+	time_diff=current_time_ms-prev_time;
+
+	integral += error * time_diff;
+	derivative = (error - last_error) / (float)time_diff;
 	last_error=error;
 
-	correction=(KP*error)+(KI*error)+(KD*error);
+	prev_time=current_time;
+
+	correction=(KP*error)+(KI*integral)+(KD*derivative);
 
 }
 
