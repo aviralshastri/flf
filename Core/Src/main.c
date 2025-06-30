@@ -56,7 +56,7 @@ UART_HandleTypeDef huart3;
 
 
 #define IR_CHANNEL_COUNT 16
-#define CALIB_SAMPLES    100
+#define CALIB_SAMPLES    50
 #define CENTER_VALUE     2047
 #define MIN_GROUP_COUNT  10
 
@@ -64,22 +64,25 @@ UART_HandleTypeDef huart3;
 volatile uint16_t ir_buffer0[IR_CHANNEL_COUNT];
 volatile uint16_t ir_buffer1[IR_CHANNEL_COUNT];
 volatile uint16_t *ir_buffers[2] = { ir_buffer0, ir_buffer1 };
-volatile uint16_t last_error =0;
-volatile float integral=0;
-volatile float error = 0.0f;
-volatile uint32_t time_diff = 0;
-volatile float derivative=0;
-volatile float correction=0;
-volatile int8_t weights[16]={-7,-6,-5,-4,-3,-2,-1,0,1,2,3,4,5,6,7,0};
+
 volatile uint8_t write_buf_idx = 0;
 volatile uint8_t read_buf_idx  = 1;
 volatile uint8_t current_ir    = 0;
 volatile uint16_t motor_a_speed = 0;
 volatile uint16_t motor_b_speed = 0;
 volatile uint16_t adc_dma_val;
-volatile uint32_t prev_time = HAL_GetTick();
+uint32_t last_button_press_time = 0;
+
+volatile uint16_t last_error =0;
+volatile float integral=0;
+volatile float error = 0.0f;
+volatile float derivative=0;
+volatile float correction=0;
+volatile int8_t weights[16]={-7,-6,-5,-4,-3,-2,-1,0,1,2,3,4,5,6,7,0};
+volatile uint32_t time_diff = 0;
+volatile uint32_t prev_time = 0;
 volatile uint32_t current_time =0;
-volatile float threshold[IR_CHANNEL_COUNT];
+volatile uint32_t thresholds[IR_CHANNEL_COUNT];
 
 
 
@@ -121,6 +124,66 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
     }
 }
 
+void SendIRValuesUART(void)
+{
+  char buffer[256];
+  int len = 0;
+
+  for (int i = 0; i < IR_CHANNEL_COUNT; i++)
+  {
+    len += sprintf(&buffer[len], "%u",thresholds[i]);
+
+    if (i < IR_CHANNEL_COUNT - 1)
+    {
+      len += sprintf(&buffer[len], ",");
+    }
+  }
+
+  len += sprintf(&buffer[len], "\r\n");
+
+  HAL_UART_Transmit(&huart3, (uint8_t *)buffer, len, HAL_MAX_DELAY);
+}
+
+
+
+void MotorControl(uint8_t direction_a, uint8_t value_a, uint8_t direction_b, uint8_t value_b)
+{
+	//given the flf front is facing the observer
+	//motor a is left
+	//motor b is right
+
+    if(value_a > 100) value_a = 100;
+    if(value_b > 100) value_b = 100;
+
+
+    if(direction_a)
+    {
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET);
+    }
+    else
+    {
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_SET);
+    }
+
+    if(direction_b)
+    {
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+    }
+    else
+    {
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+    }
+
+    uint32_t pwm_a = (value_a * 999) / 100;
+    uint32_t pwm_b = (value_b * 999) / 100;
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_a);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, pwm_b);
+}
 
 int boyer_moore_majority(int *arr, int size) {
     int candidate = -1;
@@ -139,81 +202,100 @@ int boyer_moore_majority(int *arr, int size) {
 }
 
 
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == GPIO_PIN_9)
+  {
+    uint32_t current_time = HAL_GetTick();
+
+    if (current_time - last_button_press_time >= 200)
+    {
+      last_button_press_time = current_time;
+
+      SendIRValuesUART();
+    }
+  }
+}
+
+
 
 void calibration(void) {
 
-	// motor start function
+// motor start function
 
-    int calib_data[CALIB_SAMPLES][IR_CHANNEL_COUNT];
-    int i, j;
+int calib_data[CALIB_SAMPLES][IR_CHANNEL_COUNT];
+int i, j;
 
-    for (i = 0; i < CALIB_SAMPLES; i++) {
-        for (j = 0; j < IR_CHANNEL_COUNT; j++) {
-            calib_data[i][j] = ir_buffers[read_buf_idx][j];
-        }
-        HAL_Delay(5);
-    }
+MotorControl(1,100,0,100);
 
+for (i = 0; i < CALIB_SAMPLES; i++) {
+for (j = 0; j < IR_CHANNEL_COUNT; j++) {
+calib_data[i][j] = ir_buffers[read_buf_idx][j];
+HAL_Delay(20);
+}
+HAL_Delay(10);
+}
 
-    for (j = 0; j < IR_CHANNEL_COUNT; j++) {
-        int black_vals[CALIB_SAMPLES], white_vals[CALIB_SAMPLES];
-        int black_count = 0, white_count = 0;
-        int min_val = 4095, max_val = 0;
+MotorControl(1,0,1,0);
 
+for (j = 0; j < IR_CHANNEL_COUNT; j++) {
+int black_vals[CALIB_SAMPLES], white_vals[CALIB_SAMPLES];
+int black_count = 0, white_count = 0;
+int min_val = 4095, max_val = 0;
 
-        for (i = 0; i < CALIB_SAMPLES; i++) {
-            int value = calib_data[i][j];
+for (i = 0; i < CALIB_SAMPLES; i++) {
+int value = calib_data[i][j];
 
-            if (value >= CENTER_VALUE) {
-                black_vals[black_count++] = value;
-            } else {
-                white_vals[white_count++] = value;
-            }
+if (value >= CENTER_VALUE) {
+black_vals[black_count++] = value;
+} else {
+white_vals[white_count++] = value;
+}
 
-            if (value < min_val) min_val = value;
-            if (value > max_val) max_val = value;
-        }
+if (value < min_val) min_val = value;
+if (value > max_val) max_val = value;
+}
 
-        if (black_count >= MIN_GROUP_COUNT && white_count >= MIN_GROUP_COUNT) {
-            int black_majority = boyer_moore_majority(black_vals, black_count);
-            int white_majority = boyer_moore_majority(white_vals, white_count);
-            thresholds[j] = (black_majority + white_majority) / 2;
-        }
-        else {
-            thresholds[j] = (min_val + max_val) / 2;
-        }
-    }
+if (black_count >= MIN_GROUP_COUNT && white_count >= MIN_GROUP_COUNT) {
+int black_majority = boyer_moore_majority(black_vals, black_count);
+int white_majority = boyer_moore_majority(white_vals, white_count);
+thresholds[j] = (black_majority + white_majority) / 2;
+}
+else {
+thresholds[j] = (min_val + max_val) / 2;
+}
+}
 
-    // motor stop function
+// motor stop function
 }
 
 
-void pid_loop(void){
-
-	int weighted_sum=0;
-	int total_activation = 0;
-
-
-	for (int i=0;i<IR_CHANNEL_COUNT;i++){
-		weighted_sum+=(ir_buffers[read_buf_idx][i]*weights[i]);
-	}
-
-	if (weighted_sum!=0){
-
-	}
-
-	current_time= HAL_GetTick();
-	time_diff=current_time_ms-prev_time;
-
-	integral += error * time_diff;
-	derivative = (error - last_error) / (float)time_diff;
-	last_error=error;
-
-	prev_time=current_time;
-
-	correction=(KP*error)+(KI*integral)+(KD*derivative);
-
-}
+//void pid_loop(void){
+//
+//	int weighted_sum=0;
+//	int total_activation = 0;
+//
+//
+//	for (int i=0;i<IR_CHANNEL_COUNT;i++){
+//		weighted_sum+=(ir_buffers[read_buf_idx][i]*weights[i]);
+//	}
+//
+//	if (weighted_sum!=0){
+//
+//	}
+//
+//	current_time= HAL_GetTick();
+//	time_diff=current_time_ms-prev_time;
+//
+//	integral += error * time_diff;
+//	derivative = (error - last_error) / (float)time_diff;
+//	last_error=error;
+//
+//	prev_time=current_time;
+//
+//	correction=(KP*error)+(KI*integral)+(KD*derivative);
+//
+//}
 
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
@@ -224,20 +306,20 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
         HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&adc_dma_val, 1);
 
     }
-    else if (htim->Instance == TIM3) {
-    	pid_loop();
+//    else if(htim->Instance == TIM3)
+//        {
+//
+//            pid_loop();
+//
+//        }
 
-    }
 
 }
-
-
 
 
 void setMuxChannel(uint8_t ch)
 {
     if(ch >= 16) return;
-
 
 
     switch(ch)
@@ -361,6 +443,9 @@ void setMuxChannel(uint8_t ch)
 
 
 
+
+
+
 /* USER CODE END 0 */
 
 /**
@@ -404,14 +489,16 @@ int main(void)
   HAL_TIM_Base_Start_IT(&htim4);
   HAL_TIM_Base_Start_IT(&htim3);
   setMuxChannel(0);
-  char line[256];
 
-
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
 
   // Bring STBY high to enable driver
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOA, STDBY_Pin, GPIO_PIN_SET);
+
+  HAL_Delay(5000);
+  calibration();
+
 
   /* USER CODE END 2 */
 
@@ -419,8 +506,6 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-
-
 
     /* USER CODE END WHILE */
 
@@ -544,7 +629,7 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 72-1;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 224-1;
+  htim1.Init.Period = 1000-1;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -612,7 +697,7 @@ static void MX_TIM3_Init(void)
   htim3.Instance = TIM3;
   htim3.Init.Prescaler = 72-1;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 1000-1;
+  htim3.Init.Period = 224-1;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
@@ -769,11 +854,21 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : BUTTON2_Pin BUTTON1_Pin */
-  GPIO_InitStruct.Pin = BUTTON2_Pin|BUTTON1_Pin;
+  /*Configure GPIO pin : BUTTON2_Pin */
+  GPIO_InitStruct.Pin = BUTTON2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(BUTTON2_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : BUTTON1_Pin */
+  GPIO_InitStruct.Pin = BUTTON1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(BUTTON1_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
