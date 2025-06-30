@@ -270,33 +270,75 @@ thresholds[j] = (min_val + max_val) / 2;
 }
 
 
-//void pid_loop(void){
-//
-//	int weighted_sum=0;
-//	int total_activation = 0;
-//
-//
-//	for (int i=0;i<IR_CHANNEL_COUNT;i++){
-//		weighted_sum+=(ir_buffers[read_buf_idx][i]*weights[i]);
-//	}
-//
-//	if (weighted_sum!=0){
-//
-//	}
-//
-//	current_time= HAL_GetTick();
-//	time_diff=current_time_ms-prev_time;
-//
-//	integral += error * time_diff;
-//	derivative = (error - last_error) / (float)time_diff;
-//	last_error=error;
-//
-//	prev_time=current_time;
-//
-//	correction=(KP*error)+(KI*integral)+(KD*derivative);
-//
-//}
+void pid_loop(void){
 
+    // Step 1: Calculate line position using weighted average
+    int weighted_sum = 0;        // Sum of (sensor_value × weight)
+    int total_activation = 0;    // Sum of all active sensors
+
+    // Go through each IR sensor
+    for (int i = 0; i < IR_CHANNEL_COUNT; i++){
+        // Check if sensor detects black line (value > threshold)
+        if (ir_buffers[read_buf_idx][i] > thresholds[i]) {
+            // Add this sensor's contribution to line position
+            weighted_sum += weights[i];      // Add position weight
+            total_activation += 1;           // Count this sensor as active
+        }
+    }
+
+    // Step 2: Calculate error (where is line compared to center?)
+    if (total_activation > 0) {
+        // Line is detected - calculate average position
+        error = (float)weighted_sum / (float)total_activation;
+    } else {
+        // No line detected - keep last error (robot may be off track)
+        // error stays the same as before
+    }
+
+    // Step 3: Calculate time difference for derivative and integral
+    current_time = HAL_GetTick();                    // Get current time in milliseconds
+    time_diff = current_time - prev_time;           // Time since last calculation
+
+    if (time_diff > 0) {  // Make sure we have valid time difference
+
+        // Step 4: Calculate PID components
+
+        // Proportional: Current error
+        float proportional = KP * error;
+
+        // Integral: Sum of all past errors (helps with steady-state error)
+        integral += error * (float)time_diff / 1000.0f;  // Convert ms to seconds
+        float integral_term = KI * integral;
+
+        // Derivative: Rate of change of error (prevents overshooting)
+        derivative = (error - last_error) / ((float)time_diff / 1000.0f);
+        float derivative_term = KD * derivative;
+
+        // Step 5: Combine all PID terms
+        correction = proportional + integral_term + derivative_term;
+
+        // Step 6: Limit correction to prevent extreme values
+        if (correction > MAX_CORRECTION) correction = MAX_CORRECTION;
+        if (correction < -MAX_CORRECTION) correction = -MAX_CORRECTION;
+
+        // Step 7: Apply correction to motor speeds
+        int left_speed = BASE_SPEED - (int)correction;   // If correction is +, slow down left motor
+        int right_speed = BASE_SPEED + (int)correction;  // If correction is +, speed up right motor
+
+        // Make sure speeds are within valid range (0-100)
+        if (left_speed < 0) left_speed = 0;
+        if (left_speed > 100) left_speed = 100;
+        if (right_speed < 0) right_speed = 0;
+        if (right_speed > 100) right_speed = 100;
+
+        // Step 8: Send commands to motors
+        MotorControl(1, left_speed, 1, right_speed);  // Both motors forward with different speeds
+
+        // Step 9: Save values for next iteration
+        last_error = error;
+        prev_time = current_time;
+    }
+}
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
