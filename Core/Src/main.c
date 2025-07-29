@@ -50,16 +50,14 @@ UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
 
-#define KP 0.0f
+#define KP 20.0f
 #define KI 0.0f
 #define KD 0.0f
-
+#define BASE_SPEED 50
+#define MAX_CORRECTION 30
 
 #define IR_CHANNEL_COUNT 16
 #define CALIB_SAMPLES    50
-#define CENTER_VALUE     2047
-#define MIN_GROUP_COUNT  10
-
 
 volatile uint16_t ir_buffer0[IR_CHANNEL_COUNT];
 volatile uint16_t ir_buffer1[IR_CHANNEL_COUNT];
@@ -83,8 +81,7 @@ volatile uint32_t time_diff = 0;
 volatile uint32_t prev_time = 0;
 volatile uint32_t current_time =0;
 volatile uint32_t thresholds[IR_CHANNEL_COUNT];
-
-
+volatile uint8_t motor_control_enabled = 0;
 
 /* USER CODE END PV */
 
@@ -104,7 +101,6 @@ static void MX_TIM1_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
     if(hadc->Instance == ADC1)
@@ -120,41 +116,37 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
         }
 
         setMuxChannel(current_ir);
-
     }
 }
 
 void SendIRValuesUART(void)
 {
-  char buffer[256];
-  int len = 0;
+    char buffer[256];
+    int len = 0;
 
-  for (int i = 0; i < IR_CHANNEL_COUNT; i++)
-  {
-    len += sprintf(&buffer[len], "%u",thresholds[i]);
-
-    if (i < IR_CHANNEL_COUNT - 1)
+    for (int i = 0; i < IR_CHANNEL_COUNT; i++)
     {
-      len += sprintf(&buffer[len], ",");
+        len += sprintf(&buffer[len], "%u", thresholds[i]);
+
+        if (i < IR_CHANNEL_COUNT - 1)
+        {
+            len += sprintf(&buffer[len], ",");
+        }
     }
-  }
 
-  len += sprintf(&buffer[len], "\r\n");
+    len += sprintf(&buffer[len], "\r\n");
 
-  HAL_UART_Transmit(&huart3, (uint8_t *)buffer, len, HAL_MAX_DELAY);
+    HAL_UART_Transmit(&huart3, (uint8_t *)buffer, len, HAL_MAX_DELAY);
 }
-
-
 
 void MotorControl(uint8_t direction_a, uint8_t value_a, uint8_t direction_b, uint8_t value_b)
 {
-	//given the flf front is facing the observer
-	//motor a is left
-	//motor b is right
+    //given the flf front is facing the observer
+    //motor a is left
+    //motor b is right
 
     if(value_a > 100) value_a = 100;
     if(value_b > 100) value_b = 100;
-
 
     if(direction_a)
     {
@@ -185,93 +177,67 @@ void MotorControl(uint8_t direction_a, uint8_t value_a, uint8_t direction_b, uin
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, pwm_b);
 }
 
-int boyer_moore_majority(int *arr, int size) {
-    int candidate = -1;
-    int count = 0;
-    for (int i = 0; i < size; i++) {
-        if (count == 0) {
-            candidate = arr[i];
-            count = 1;
-        } else if (arr[i] == candidate) {
-            count++;
-        } else {
-            count--;
-        }
-    }
-    return candidate;
-}
+void calibration(void) {
+    int calib_data[CALIB_SAMPLES][IR_CHANNEL_COUNT];
+    int i, j;
 
+    // Collect calibration samples without moving motors
+    MotorControl(1,70,0,70);
+    for (i = 0; i < CALIB_SAMPLES; i++) {
+        for (j = 0; j < IR_CHANNEL_COUNT; j++) {
+            calib_data[i][j] = ir_buffers[read_buf_idx][j];
+            HAL_Delay(10);  // Small delay between sensor readings
+        }
+        HAL_Delay(10);  // Small delay between sample sets
+    }
+    MotorControl(1,0,1,0);
+
+    // Calculate thresholds using simple min-max method
+    for (j = 0; j < IR_CHANNEL_COUNT; j++) {
+        int min_val = 4095;
+        int max_val = 0;
+
+        // Find min and max values for this sensor
+        for (i = 0; i < CALIB_SAMPLES; i++) {
+            int value = calib_data[i][j];
+
+            if (value < min_val) min_val = value;
+            if (value > max_val) max_val = value;
+        }
+
+        // Set threshold as midpoint between min and max
+        thresholds[j] = (min_val + max_val) / 2;
+    }
+}
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == GPIO_PIN_9)
-  {
-    uint32_t current_time = HAL_GetTick();
-
-    if (current_time - last_button_press_time >= 200)
+    if (GPIO_Pin == GPIO_PIN_9)
     {
-      last_button_press_time = current_time;
+        uint32_t current_time = HAL_GetTick();
 
-      SendIRValuesUART();
+        if (current_time - last_button_press_time >= 200)
+        {
+            last_button_press_time = current_time;
+
+            // Toggle motor control state
+            motor_control_enabled = !motor_control_enabled;
+
+            // If motors are being disabled, stop them immediately
+            if (!motor_control_enabled) {
+                MotorControl(1, 0, 1, 0);  // Stop both motors
+            }
+
+            // Optional: Send status via UART for debugging
+            char status_msg[50];
+            sprintf(status_msg, "Motors %s\r\n", motor_control_enabled ? "ENABLED" : "DISABLED");
+            HAL_UART_Transmit(&huart3, (uint8_t *)status_msg, strlen(status_msg), HAL_MAX_DELAY);
+        }
     }
-  }
 }
 
-
-
-void calibration(void) {
-
-// motor start function
-
-int calib_data[CALIB_SAMPLES][IR_CHANNEL_COUNT];
-int i, j;
-
-MotorControl(1,100,0,100);
-
-for (i = 0; i < CALIB_SAMPLES; i++) {
-for (j = 0; j < IR_CHANNEL_COUNT; j++) {
-calib_data[i][j] = ir_buffers[read_buf_idx][j];
-HAL_Delay(20);
-}
-HAL_Delay(10);
-}
-
-MotorControl(1,0,1,0);
-
-for (j = 0; j < IR_CHANNEL_COUNT; j++) {
-int black_vals[CALIB_SAMPLES], white_vals[CALIB_SAMPLES];
-int black_count = 0, white_count = 0;
-int min_val = 4095, max_val = 0;
-
-for (i = 0; i < CALIB_SAMPLES; i++) {
-int value = calib_data[i][j];
-
-if (value >= CENTER_VALUE) {
-black_vals[black_count++] = value;
-} else {
-white_vals[white_count++] = value;
-}
-
-if (value < min_val) min_val = value;
-if (value > max_val) max_val = value;
-}
-
-if (black_count >= MIN_GROUP_COUNT && white_count >= MIN_GROUP_COUNT) {
-int black_majority = boyer_moore_majority(black_vals, black_count);
-int white_majority = boyer_moore_majority(white_vals, white_count);
-thresholds[j] = (black_majority + white_majority) / 2;
-}
-else {
-thresholds[j] = (min_val + max_val) / 2;
-}
-}
-
-// motor stop function
-}
-
-
+// Modified PID loop function
 void pid_loop(void){
-
     // Step 1: Calculate line position using weighted average
     int weighted_sum = 0;        // Sum of (sensor_value × weight)
     int total_activation = 0;    // Sum of all active sensors
@@ -331,8 +297,10 @@ void pid_loop(void){
         if (right_speed < 0) right_speed = 0;
         if (right_speed > 100) right_speed = 100;
 
-        // Step 8: Send commands to motors
-        MotorControl(1, left_speed, 1, right_speed);  // Both motors forward with different speeds
+        // Step 8: Motor control - only if enabled
+        if (motor_control_enabled) {
+            MotorControl(1, left_speed, 1, right_speed);  // Apply PID control to motors
+        }
 
         // Step 9: Save values for next iteration
         last_error = error;
@@ -340,29 +308,22 @@ void pid_loop(void){
     }
 }
 
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
     if(htim->Instance == TIM4)
     {
-
         HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&adc_dma_val, 1);
-
     }
-//    else if(htim->Instance == TIM3)
-//        {
-//
-//            pid_loop();
-//
-//        }
-
-
+    else if(htim->Instance == TIM3)
+    {
+        pid_loop();  // PID runs but doesn't control motors
+    }
 }
-
 
 void setMuxChannel(uint8_t ch)
 {
     if(ch >= 16) return;
-
 
     switch(ch)
     {
@@ -483,11 +444,6 @@ void setMuxChannel(uint8_t ch)
     }
 }
 
-
-
-
-
-
 /* USER CODE END 0 */
 
 /**
@@ -538,9 +494,11 @@ int main(void)
   // Bring STBY high to enable driver
   HAL_GPIO_WritePin(GPIOA, STDBY_Pin, GPIO_PIN_SET);
 
+  // Boot - wait 5 seconds
   HAL_Delay(5000);
-  calibration();
 
+  // Calibrate (without moving motors)
+  calibration();
 
   /* USER CODE END 2 */
 
@@ -548,7 +506,6 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
